@@ -846,7 +846,11 @@ INSERT INTO location(id, city) values (1, "london"), (2, "paris");
 }
 
 func TestParseRecords(t *testing.T) {
-	stmt := `SELECT {test.*, test.name, test.age INTO Person} FROM test WHERE test.name=:name;`
+	stmt := `SELECT COUNT(test.*) AS &int FROM test WHERE test.name=@Person.name;`
+	//stmt := `SELECT test.address AS &Person.address.street FROM test WHERE test.name=@map.name;`
+	//stmt := `SELECT test.address AS &Person[0].address.street FROM test WHERE test.name=@map.name;`
+	//stmt := `SELECT test.* AS &Person.* FROM test WHERE test.name=@Person.name;`
+
 	bindings, err := parseRecords(stmt, indexOfRecordArgs(stmt))
 	assert.Nil(t, err)
 	assert.Equal(t, bindings, []recordBinding{{
@@ -860,7 +864,7 @@ func TestParseRecords(t *testing.T) {
 }
 
 func TestParseMultipleRecords(t *testing.T) {
-	stmt := `SELECT {test.*, test.name, test.age INTO Person}, {'foo.*' INTO Foo}, {"other.*" INTO Other}, {Another} FROM test WHERE test.name=:name;`
+	stmt := `SELECT {test.* INTO Person}, {'foo.*' INTO Foo}, {"other.*" INTO Other}, {Another} FROM test WHERE test.name=:name;`
 	bindings, err := parseRecords(stmt, indexOfRecordArgs(stmt))
 	assert.Nil(t, err)
 	assert.Equal(t, bindings, []recordBinding{{
@@ -967,4 +971,10 @@ func TestExpandFields(t *testing.T) {
 
 	expected := "SELECT test.age, test.name AS _pfx_test_sfx_name, x, y FROM test WHERE test.name=:name;"
 	assert.Equal(t, res, expected)
+}
+
+func TestCompileStatement(t *testing.T) {
+	stmt := "SELECT people.name AS &Person.name FROM people;"
+	_, _, err := compileStatement(stmt, []reflect.ReflectStruct{})
+	assert.Nil(t, err)
 }

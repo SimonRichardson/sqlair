@@ -2,6 +2,7 @@ package sqlair
 
 import (
 	"database/sql"
+	"fmt"
 	"reflect"
 	"sort"
 	"strings"
@@ -353,7 +354,7 @@ func zeroScanType(t string) interface{} {
 	}
 }
 
-func (q Query) compileStatement(stmt string, entities []sreflect.ReflectStruct) (string, []recordBinding, error) {
+func compileStatement(stmt string, entities []sreflect.ReflectStruct) (string, []recordBinding, error) {
 	var fields []recordBinding
 	if offset := indexOfRecordArgs(stmt); offset >= 0 {
 		var err error
@@ -383,7 +384,7 @@ func (q Query) structScan(tx *sql.Tx, stmt string, args []interface{}, entities 
 		fields = cached.fields
 	} else {
 		var err error
-		compiledStmt, fields, err = q.compileStatement(stmt, entities)
+		compiledStmt, fields, err = compileStatement(stmt, entities)
 		if err != nil {
 			return err
 		}
@@ -420,7 +421,7 @@ func (q Query) sliceStructScan(tx *sql.Tx, stmt string, args []interface{}, slic
 	for i, ref := range slice {
 		elements[i] = ref.element
 	}
-	compiledStmt, fields, err := q.compileStatement(stmt, elements)
+	compiledStmt, fields, err := compileStatement(stmt, elements)
 	if err != nil {
 		return err
 	}
@@ -762,7 +763,7 @@ func convertMapStringInterface(v interface{}) (map[string]interface{}, bool) {
 // indexOfRecordArgs returns the potential starting index of a record argument
 // if the statement contains the record args offset position.
 func indexOfRecordArgs(stmt string) int {
-	return strings.IndexRune(stmt, '{')
+	return strings.IndexRune(stmt, '&')
 }
 
 type recordBinding struct {
@@ -778,125 +779,58 @@ func (f recordBinding) translate(expantion int) int {
 }
 
 func parseRecords(stmt string, offset int) ([]recordBinding, error) {
-	// TODO: Create a tokenizer and AST for a record bindings. For now we'll
-	// just walk over them in a handrolled style, until the need arises.
-
 	var records []recordBinding
 	for i := offset; i < len(stmt); i++ {
 		r := rune(stmt[i])
-		if r != '{' {
+		if r != '&' {
 			return records, nil
 		}
 
-		// Parse the Record syntax `{Record}` or optionally `{test.* INTO Record}`
-		// We can consider this being the tokenizer.
-		var record string
-		quotes := make(map[rune]int)
-	inner:
-		for i = i + 1; i < len(stmt); i++ {
-			char := rune(stmt[i])
+		// Parse the Record syntax `<table>.<column|*> AS &<entity path>`
 
-			switch {
-			case unicode.IsLetter(char) || unicode.IsSpace(char) || unicode.IsNumber(char) || unicode.IsDigit(char):
-				fallthrough
-			case char == '_', char == ',', char == '.', char == '*':
-				record += string(char)
-			case char == '"' || char == '\'':
-				if quotes[char] == 0 {
-					quotes[char]++
-					continue
-				}
-
-				// peek forward.
-				if i+1 < len(stmt) {
-					peek := rune(stmt[i+1])
-					if unicode.IsSpace(peek) || peek == '.' {
-						quotes[char]++
-						continue
-					}
-				}
-				return nil, errors.Errorf("unexpected quoted string at %d in record expression %q", i-offset, stmt[offset+1:i+1])
-			case char == '}':
-				break inner
-
-			default:
-				return nil, errors.Errorf("unexpected struct name at %d in record expression %q", i-offset, stmt[offset+1:i+1])
-			}
+		// The first part of the record pinding is to select the entity path.
+		fmt.Println("??")
+		entityPath, err := parseRecordPath(stmt, i+1)
+		if err != nil && err != ErrTooMany {
+			return nil, err
 		}
+		fmt.Println("???")
 
-		// The following parses the fields, so that we know what to fill in the
-		// record.
-		// This is more akin to a parser, over a series of runes in a string.
+		// Reverse the look to ensure we have ` AS ` selector.
 		var (
-			fields       = make(map[string]struct{})
-			wildcard     bool
-			name, prefix string
+			selector string
+			offset   int
 		)
-
-		parts := strings.Split(strings.TrimSpace(record), " ")
-		if num := len(parts); num == 1 {
-			name = parts[0]
-			wildcard = true
-		} else if num > 1 && strings.ToLower(parts[num-2]) == "into" {
-			name = parts[num-1]
-			// Some limitations, all prefixes have to match.
-			for _, part := range parts[:num-2] {
-				// We want to normalize all the fields in a record. We do this
-				// by removing any white space.
-				field := strings.TrimSuffix(strings.TrimSpace(part), ",")
-				// We always expect 2 values.
-				fieldParts := strings.Split(field, ".")
-				if num := len(fieldParts); num == 0 || num > 2 {
-					return nil, errors.Errorf("unexpected field %q in record expression %q", field, record)
-				} else if num == 1 {
-					// Ensure we always have two field parts, as that will make
-					// the logic below a lot simpler.
-					fieldParts = []string{"", fieldParts[0]}
+	inner:
+		for k := i - 1; k >= 0; k-- {
+			char := rune(stmt[k])
+			switch {
+			case unicode.IsSpace(char):
+				if len(selector) > 0 {
+					break inner
 				}
-				if len(fields) != 0 && prefix != fieldParts[0] {
-					return nil, errors.Errorf("unexpected table name %q in field %q for record expression %q", fieldParts[0], field, record)
-				}
-				prefix = fieldParts[0]
-
-				fieldValue := strings.TrimSpace(fieldParts[1])
-				if fieldValue == "*" {
-					wildcard = true
-				}
-				fields[fieldValue] = struct{}{}
+			case unicode.IsLetter(char):
+				selector = string(char) + selector
+			default:
+				return nil, errors.Errorf("expected selector")
 			}
-		} else {
-			return nil, errors.Errorf("unexpected record expression %q", record)
+			offset = k
+		}
+		switch strings.ToLower(strings.TrimSpace(selector)) {
+		case "as":
+		default:
+			return nil, errors.Errorf("expected AS selector, got: %q", selector)
 		}
 
-		// This is a very basic algorithm.
-		for char, amount := range quotes {
-			if amount%2 != 0 {
-				return nil, errors.Errorf("missing quote %q terminator for record expression %q", string(char), record)
-			}
-		}
+		// Reverse the look to ensure we the `<table>.<column|*>`.
 
-		records = append(records, recordBinding{
-			name:     strings.TrimSpace(name),
-			prefix:   prefix,
-			fields:   fields,
-			wildcard: wildcard,
-			start:    offset,
-			end:      i + 1,
-		})
-
-		if i >= len(stmt) {
-			// We're done processing the stmt.
-			break
+		prior := 0
+		fmt.Println(">>", offset)
+		tablePath, err := parseRecordPath(stmt, prior+1)
+		if err != nil && err != ErrTooMany {
+			return nil, err
 		}
-		index := indexOfRecordArgs(stmt[i:])
-		if index == -1 {
-			// No additional names, skip.
-			break
-		}
-		// We want to reduce the index by 1, so that we also pick up the
-		// prefix, otherwise we skip over it.
-		offset = i + index
-		i = offset - 1
+		fmt.Println(entityPath, tablePath)
 	}
 	return records, nil
 }
