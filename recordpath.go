@@ -6,9 +6,9 @@ import (
 	"github.com/SimonRichardson/sqlair/parser"
 )
 
-func tokenizeRecordPath(stmt string, offset int) (*parser.QueryExpression, error) {
+func tokenizeRecordPath(stmt string, offset int) (*parser.QueryExpression, int, error) {
 	lexer := parser.NewLexer(stmt[offset:])
-	parser := parser.NewRecordPathParser(lexer)
+	parser := parser.NewParser(lexer)
 	return parser.Run()
 }
 
@@ -46,13 +46,17 @@ func makeRecordPathString(value string) recordPath {
 	}
 }
 
-func parseRecordPath(stmt string, offset int) ([]recordPath, error) {
-	ast, err := tokenizeRecordPath(stmt, offset)
+func parseRecordPath(stmt string, offset int) ([]recordPath, int, error) {
+	ast, consumed, err := tokenizeRecordPath(stmt, offset)
 	if err != nil {
-		return nil, err
+		return nil, consumed, err
 	}
 
-	return compileRecordPathAST(ast)
+	paths, err := compileRecordPathAST(ast)
+	if err != nil {
+		return nil, -1, err
+	}
+	return paths, consumed, nil
 }
 
 var (
@@ -113,6 +117,9 @@ func compileRecordPathAST(ast parser.Expression) ([]recordPath, error) {
 
 	case *parser.String:
 		return []recordPath{makeRecordPathString(node.Token.Literal)}, nil
+
+	case *parser.Separator, *parser.Empty:
+		return nil, nil
 	}
 
 	return nil, fmt.Errorf("syntax error: unexpected expression %T", ast)

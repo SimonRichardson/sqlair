@@ -22,14 +22,12 @@ type Lexer struct {
 
 // NewLexer creates a new Lexer from a given input.
 func NewLexer(input string) *Lexer {
-	lex := &Lexer{
+	return &Lexer{
 		input:  []rune(input),
-		char:   ' ',
+		char:   0,
 		line:   1,
 		column: 1,
 	}
-
-	return lex
 }
 
 // ReadNext will attempt to read the next character and correctly setup the
@@ -66,11 +64,18 @@ func (l *Lexer) PeekN(n int) rune {
 
 // NextToken attempts to grab the next token available.
 func (l *Lexer) NextToken() Token {
-	var tok Token
-	l.skipWhitespace()
-
 	pos := l.getPosition()
 	pos.Column--
+
+	var tok Token
+	if l.skipWhitespace() {
+		tok = MakeToken(SEPARATOR, ' ')
+
+		l.ReadNext()
+
+		tok.Pos = pos
+		return tok
+	}
 
 	if t, ok := tokenMap[l.char]; ok {
 		switch t {
@@ -98,15 +103,18 @@ func (l *Lexer) readRunesToken() Token {
 		tok.Literal = ""
 		tok.Type = EOF
 		return tok
+
 	case isDigit(l.char):
 		literal := l.readNumber()
 		tok.Type = INT
 		tok.Literal = literal
 		return tok
+
 	case isLetter(l.char):
 		tok.Literal = l.readIdentifier()
 		tok.Type = IDENT
 		return tok
+
 	case isQuote(l.char):
 		if s, err := l.readString(l.char); err == nil {
 			tok.Type = STRING
@@ -118,10 +126,13 @@ func (l *Lexer) readRunesToken() Token {
 	return MakeToken(UNKNOWN, l.char)
 }
 
-func (l *Lexer) skipWhitespace() {
+func (l *Lexer) skipWhitespace() bool {
+	var skipped bool
 	for unicode.IsSpace(l.char) {
 		l.ReadNext()
+		skipped = true
 	}
+	return skipped
 }
 
 func (l *Lexer) readIdentifier() string {

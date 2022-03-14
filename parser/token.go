@@ -8,6 +8,7 @@ type TokenType int
 const (
 	UNKNOWN TokenType = (iota - 1)
 	EOF
+	SEPARATOR
 
 	IDENT
 	INT //int literal
@@ -20,9 +21,8 @@ const (
 	LBRACKET // [
 	RBRACKET // ]
 
-	BITAND    // &
-	SEMICOLON // ;
-	PERIOD    // .
+	BITAND // &
+	PERIOD // .
 )
 
 func (t TokenType) String() string {
@@ -35,8 +35,6 @@ func (t TokenType) String() string {
 		return "INT"
 	case PERIOD:
 		return "."
-	case SEMICOLON:
-		return ";"
 	case COMMA:
 		return ","
 	case LPAREN:
@@ -51,6 +49,8 @@ func (t TokenType) String() string {
 		return "&"
 	case STRING:
 		return `""`
+	case SEPARATOR:
+		return ` `
 	default:
 		return "<UNKNOWN>"
 	}
@@ -91,7 +91,6 @@ var (
 )
 
 var tokenMap = map[rune]TokenType{
-	';': SEMICOLON,
 	'(': LPAREN,
 	')': RPAREN,
 	'[': LBRACKET,

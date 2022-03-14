@@ -2,7 +2,6 @@ package sqlair
 
 import (
 	"database/sql"
-	"fmt"
 	"reflect"
 	"sort"
 	"strings"
@@ -473,10 +472,10 @@ func (q Query) structMapping(columns []*sql.ColumnType, entities []sreflect.Refl
 	for i, column := range columns {
 		columnName := column.Name()
 
-		var prefix string
+		//var prefix string
 		if strings.HasPrefix(columnName, AliasPrefix) {
 			parts := strings.Split(columnName[len(AliasPrefix):], AliasSeparator)
-			prefix = parts[0]
+			//	prefix = parts[0]
 			columnName = parts[1]
 		}
 
@@ -486,18 +485,20 @@ func (q Query) structMapping(columns []*sql.ColumnType, entities []sreflect.Refl
 			if !ok {
 				continue
 			}
-			if prefix != "" {
-				var bindingFound bool
-				for _, binding := range fields {
-					if binding.name == entity.Name && binding.prefix == prefix {
-						bindingFound = true
-						break
+			/*
+				if prefix != "" {
+					var bindingFound bool
+					for _, binding := range fields {
+						if binding.name == entity.Name && binding.prefix == prefix {
+							bindingFound = true
+							break
+						}
+					}
+					if !bindingFound {
+						continue
 					}
 				}
-				if !bindingFound {
-					continue
-				}
-			}
+			*/
 
 			columnar[i] = field.Value.Addr().Interface()
 			found = true
@@ -767,9 +768,8 @@ func indexOfRecordArgs(stmt string) int {
 }
 
 type recordBinding struct {
-	name       string
-	prefix     string
-	fields     map[string]struct{}
+	namePath   []recordPath // <table>.<column>
+	entityPath []recordPath // &<Type>.<path>.<path>
 	wildcard   bool
 	start, end int
 }
@@ -780,6 +780,7 @@ func (f recordBinding) translate(expantion int) int {
 
 func parseRecords(stmt string, offset int) ([]recordBinding, error) {
 	var records []recordBinding
+outer:
 	for i := offset; i < len(stmt); i++ {
 		r := rune(stmt[i])
 		if r != '&' {
@@ -789,17 +790,15 @@ func parseRecords(stmt string, offset int) ([]recordBinding, error) {
 		// Parse the Record syntax `<table>.<column|*> AS &<entity path>`
 
 		// The first part of the record pinding is to select the entity path.
-		fmt.Println("??")
-		entityPath, err := parseRecordPath(stmt, i+1)
-		if err != nil && err != ErrTooMany {
+		entityPath, consumed, err := parseRecordPath(stmt, i+1)
+		if err != nil {
 			return nil, err
 		}
-		fmt.Println("???")
 
-		// Reverse the look to ensure we have ` AS ` selector.
+		// Reverse the look to see if we have ` AS ` selector.
 		var (
 			selector string
-			offset   int
+			position int
 		)
 	inner:
 		for k := i - 1; k >= 0; k-- {
@@ -814,89 +813,147 @@ func parseRecords(stmt string, offset int) ([]recordBinding, error) {
 			default:
 				return nil, errors.Errorf("expected selector")
 			}
-			offset = k
+			position = k
 		}
 		switch strings.ToLower(strings.TrimSpace(selector)) {
 		case "as":
 		default:
+			// If we don't locate an AS statement, then we should just be a
+			// `&` followed by an identifier.
+			if len(entityPath) == 1 && entityPath[0].tokenType == recordPathIdent {
+				records = append(records, recordBinding{
+					entityPath: entityPath,
+					wildcard:   true,
+					start:      position,
+					end:        consumed,
+				})
+				continue outer
+			}
 			return nil, errors.Errorf("expected AS selector, got: %q", selector)
 		}
 
 		// Reverse the look to ensure we the `<table>.<column|*>`.
-
-		prior := 0
-		fmt.Println(">>", offset)
-		tablePath, err := parseRecordPath(stmt, prior+1)
-		if err != nil && err != ErrTooMany {
+		tableOffset := locatePriorOffset(stmt, position)
+		namePath, nameConsumed, err := parseRecordPath(stmt, tableOffset)
+		if err != nil {
 			return nil, err
 		}
-		fmt.Println(entityPath, tablePath)
+
+		wildcard, err := parseWildcard(namePath)
+		if err != nil {
+			return nil, err
+		}
+
+		records = append(records, recordBinding{
+			namePath:   namePath,
+			entityPath: entityPath,
+			wildcard:   wildcard,
+			start:      position,
+			end:        position + nameConsumed + consumed + 2,
+		})
 	}
 	return records, nil
 }
 
-func expandRecords(stmt string, records []recordBinding, entities []sreflect.ReflectStruct, intersections map[string]map[string]struct{}) (string, error) {
-	var offset int
-	for _, record := range records {
-
-		var found bool
-		for _, entity := range entities {
-			if record.name != entity.Name {
-				continue
-			}
-
-			// Locate any field intersections from the records that's been
-			// pre-computed.
-			entityInter := intersections[entity.Name]
-
-			var names []string
-			if record.wildcard {
-				// If we're wildcarded, just grab all the names.
-				for name := range entity.Fields {
-					names = append(names, constructFieldNameAlias(name, record, entityInter))
-				}
-			} else {
-				// If we're not wildcarded, go through all the binding fields
-				// and locate the entity field for the Record.
-				for name := range record.fields {
-					if _, ok := entity.Fields[name]; !ok {
-						return "", errors.Errorf("field %q not found in entity %q", name, entity.Name)
-					}
-					names = append(names, constructFieldNameAlias(name, record, entityInter))
-				}
-			}
-
-			if len(names) == 0 {
-				return "", errors.Errorf("no fields found in record %q expression", entity.Name)
-			}
-			sort.Strings(names)
-			recordList := strings.Join(names, ", ")
-			stmt = stmt[:offset+record.start] + recordList + stmt[offset+record.end:]
-
-			// Translate the offset to take into account the new expantions.
-			offset += record.translate(len(recordList))
-
+func locatePriorOffset(stmt string, offset int) int {
+	var found bool
+loop:
+	for k := offset - 1; k >= 0; k-- {
+		char := rune(stmt[k])
+		switch {
+		case found && unicode.IsSpace(char):
+			break loop
+		case char == ',' || char == '(':
+			break loop
+		default:
 			found = true
-			break
 		}
+		offset = k
+	}
+	return offset
+}
 
-		if !found {
-			return "", errors.Errorf("no entity found with the name %q", record.name)
+func parseWildcard(paths []recordPath) (bool, error) {
+	for i, path := range paths {
+		switch path.tokenType {
+		case recordPathIdent:
+			if path.value.(string) == "*" {
+				if i == len(paths)-1 {
+					return true, nil
+				}
+				return false, errors.Errorf("expected wildcard to be last value of the name path")
+			}
 		}
 	}
+	return false, nil
+}
 
+func expandRecords(stmt string, records []recordBinding, entities []sreflect.ReflectStruct, intersections map[string]map[string]struct{}) (string, error) {
+	/*
+		var offset int
+		for _, record := range records {
+
+			var found bool
+			for _, entity := range entities {
+				if record.name != entity.Name {
+					continue
+				}
+
+				// Locate any field intersections from the records that's been
+				// pre-computed.
+				entityInter := intersections[entity.Name]
+
+				var names []string
+				if record.wildcard {
+					// If we're wildcarded, just grab all the names.
+					for name := range entity.Fields {
+						names = append(names, constructFieldNameAlias(name, record, entityInter))
+					}
+				} else {
+					// If we're not wildcarded, go through all the binding fields
+					// and locate the entity field for the Record.
+					for name := range record.fields {
+						if _, ok := entity.Fields[name]; !ok {
+							return "", errors.Errorf("field %q not found in entity %q", name, entity.Name)
+						}
+						names = append(names, constructFieldNameAlias(name, record, entityInter))
+					}
+				}
+
+				if len(names) == 0 {
+					return "", errors.Errorf("no fields found in record %q expression", entity.Name)
+				}
+				sort.Strings(names)
+				recordList := strings.Join(names, ", ")
+				stmt = stmt[:offset+record.start] + recordList + stmt[offset+record.end:]
+
+				// Translate the offset to take into account the new expantions.
+				offset += record.translate(len(recordList))
+
+				found = true
+				break
+			}
+
+			if !found {
+				return "", errors.Errorf("no entity found with the name %q", record.name)
+			}
+		}
+	*/
 	return stmt, nil
 }
 
 func constructFieldNameAlias(name string, record recordBinding, intersection map[string]struct{}) string {
-	if record.prefix == "" {
-		return name
-	}
-	var alias string
-	if _, ok := intersection[name]; ok {
-		alias = " AS " + AliasPrefix + record.prefix + AliasSeparator + name
-	}
-	return record.prefix + "." + name + alias
+	/*
+		if record.prefix == "" {
+			return name
+		}
+		var alias string
+		if _, ok := intersection[name]; ok {
+			alias = " AS " + AliasPrefix + record.prefix + AliasSeparator + name
+		}
+		return record.prefix + "." + name + alias
+	*/
+	return name
 }
 
 func fieldIntersections(entities []sreflect.ReflectStruct) map[string]map[string]struct{} {

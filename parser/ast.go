@@ -69,8 +69,8 @@ func (es *ExpressionStatement) String() string {
 		if str == "" {
 			return ";"
 		}
-		if str[len(str)-1:] != ";" {
-			str += ";"
+		if str[len(str)-1:] != " " {
+			str += " "
 		}
 		return strings.TrimSpace(str)
 	}
@@ -176,6 +176,23 @@ func (i *String) End() Position {
 }
 
 func (i *String) String() string { return fmt.Sprintf("%q", i.Token.Literal) }
+
+// Separator represents an separator expression
+type Separator struct {
+	Token Token
+}
+
+// Pos returns the first position of the separator expression.
+func (i *Separator) Pos() Position {
+	return i.Token.Pos
+}
+
+// End returns the last position of the separator expression.
+func (i *Separator) End() Position {
+	return i.Token.Pos
+}
+
+func (i *Separator) String() string { return " " }
 
 // Empty represents an empty expression
 type Empty struct {
